@@ -1,24 +1,17 @@
 classdef CocoStuffAnnotator < handle & dynamicprops
     % COCO-Stuff image annotation class.
     %
-    % This is the simplified version of the annotation tool used to
-    % annotate the COCO-Stuff dataset. It annotates superpixels with a
-    % paintbrush tool and clamps the known thing pixels from COCO.
-    %
-    % Requirements: For the two example images, take a look at
-    % data/input/.. to see the files with their regions and thing labels.
-    % All point coordinates are [y, x]
-    % Keyboard: 1-9 for labels, +- for scale, left/right click for add/remove
+    % This is the modified version of the annotation tool used to
+    % annotate the COCO-Stuff dataset. It annotates superpixel depth with a
+    % paintbrush tool.
     %
     % Copyright by Holger Caesar, 2017
     
     properties
         % Settings
         regionName = 'slico-1000'
-        toolVersion = '0.9'
-        useThings = true;
+        toolVersion = '0.9d'
         useSuperpixels = true;
-        usePolygons = false;
         
         % Main figure
         figMain
@@ -30,21 +23,10 @@ classdef CocoStuffAnnotator < handle & dynamicprops
         handleImage
         handleLabelMap
         handleBoundary
-        handlePolygon
-        
-        % Pick label specific
-        figLabelHierarchy
-        ysLabelHierarchyIn
-        xsLabelHierarchyIn
-        ysLabelHierarchyOut
-        xsLabelHierarchyOut
-        categoriesLabelHierarchyIn
-        categoriesLabelHierarchyOut
         
         % Class ids
         cls_unprocessed
         cls_unlabeled
-        cls_things
         
         % Content fields
         labelIdx
@@ -53,7 +35,7 @@ classdef CocoStuffAnnotator < handle & dynamicprops
         drawMode = 'superpixelDraw';
         drawOverwrite = false;
         drawSizes = [1, 2, 5, 10, 15, 20, 30, 50, 100]';
-        drawSize = 10;
+        drawSize = 20;
         drawColors
         drawColor
         drawNow = false;
@@ -89,9 +71,6 @@ classdef CocoStuffAnnotator < handle & dynamicprops
         timeImagePrevious
         timeImageDrawPrevious
         lastDrawTime
-        
-        % Polygon-specific
-        curPolygon
     end
     
     methods
@@ -128,20 +107,16 @@ classdef CocoStuffAnnotator < handle & dynamicprops
             rng(42);
             
             % Get dataset options
-            stuffLabels = CocoStuffClasses.getLabelNamesStuff();
-            obj.labelNames = ['unprocessed'; 'unlabeled'; 'things'; stuffLabels];
+            labelNames = arrayfun(@(x) num2str(x), 1:10, 'UniformOutput', false)';
+            obj.labelNames = ['unprocessed'; 'unlabeled'; labelNames];
             obj.cls_unprocessed = find(strcmp(obj.labelNames, 'unprocessed'));
             obj.cls_unlabeled = find(strcmp(obj.labelNames, 'unlabeled'));
-            obj.cls_things = find(strcmp(obj.labelNames, 'things'));
             obj.labelIdx = obj.cls_unlabeled;
             labelCount = numel(obj.labelNames);
             unprocessedColor = [1, 1, 1];
             unlabeledColor = [0, 0, 0];
-            otherColors = jet(numel(stuffLabels)+1);
-            thingColor = otherColors(1, :);
-            stuffColors = otherColors(2:end, :);
-            stuffColors = stuffColors(randperm(size(stuffColors, 1)), :);
-            obj.drawColors = [unprocessedColor; unlabeledColor; thingColor; stuffColors];
+            otherColors = hot(numel(labelNames));
+            obj.drawColors = [unprocessedColor; unlabeledColor; otherColors];
             obj.drawColor = obj.drawColors(obj.labelIdx, :);
             assert(size(obj.drawColors, 1) == labelCount);
             
@@ -166,10 +141,6 @@ classdef CocoStuffAnnotator < handle & dynamicprops
             obj.containerOptions = uiflowcontainer('v0', obj.figMain, 'Units', 'Norm', 'Position', [menuLeft, .90, menuRight, .05]);
             
             % Create buttons
-            obj.ui.buttonLabelHierarchy = uicontrol(obj.containerButtons, ...
-                'String', 'Label hierarchy', ...
-                'Callback', @(handle, event) obj.buttonLabelHierarchyClick(), ...
-                'Tag', 'buttonLabelHierarchy');
             
             obj.ui.buttonPickLabel = uicontrol(obj.containerButtons, ...
                 'String', 'Pick label', ...
@@ -253,7 +224,6 @@ classdef CocoStuffAnnotator < handle & dynamicprops
             obj.handleImage = imshow([]);
             obj.handleLabelMap = image([]);
             obj.handleBoundary = image([]);
-            obj.handlePolygon = image([]);
             hold off;
             
             % Specify the colors for each label in the labelMap
@@ -265,7 +235,6 @@ classdef CocoStuffAnnotator < handle & dynamicprops
             % Image event callbacks
             set(obj.handleLabelMap, 'ButtonDownFcn', @(handle, event) handleClickDown(obj, handle, event));
             set(obj.handleBoundary, 'ButtonDownFcn', @(handle, event) handleClickDown(obj, handle, event));
-            set(obj.handlePolygon,  'ButtonDownFcn', @(handle, event) handleClickDown(obj, handle, event));
             
             % Figure event callbacks
             set(obj.figMain, 'WindowButtonMotionFcn', @(handle, event) figMouseMove(obj, handle, event));
@@ -276,12 +245,6 @@ classdef CocoStuffAnnotator < handle & dynamicprops
             
             % Set fancy mouse pointer
             setCirclePointer(obj.figMain);
-            
-            % Set drawMode
-            if obj.usePolygons
-                obj.drawModeDefault = 'polygonDraw';
-                obj.drawMode = 'polygonDraw';
-            end
             
             % Load image
             obj.loadImage();
@@ -317,21 +280,6 @@ classdef CocoStuffAnnotator < handle & dynamicprops
                 obj.regionBoundaries = false(obj.imageSize(1:2));
             end
             
-            % Load things from file if specified
-            thingPath = fullfile(obj.thingFolder, sprintf('%s.mat', obj.imageName));
-            if obj.useThings && exist(thingPath, 'file')
-                % Load things
-                thingStruct = load(thingPath, 'labelMapThings');
-                labelMapThings = thingStruct.labelMapThings;
-            elseif obj.useThings
-                % Load dummy things and print warning
-                labelMapThings = false(size(obj.regionMap));
-                fprintf('Warning: Cannot find things file: %s\n', thingPath);
-            else
-                % Load dummy things and ignore
-                labelMapThings = false(size(obj.regionMap));
-            end
-            
             % Load annotation if it already exists
             outputPath = fullfile(obj.outputFolder, sprintf('%s.mat', obj.imageName));
             if exist(outputPath, 'file')
@@ -361,7 +309,6 @@ classdef CocoStuffAnnotator < handle & dynamicprops
             else
                 fprintf('Creating new annotation %s...\n', outputPath);
                 labelMap = repmat(obj.cls_unprocessed, [obj.imageSize(1), obj.imageSize(2)]);
-                labelMap(labelMapThings) = obj.cls_things;
                 obj.timeImagePrevious = 0;
                 obj.timeImageDrawPrevious = 0;
                 obj.timeMap = nan(obj.imageSize(1:2));
@@ -374,11 +321,9 @@ classdef CocoStuffAnnotator < handle & dynamicprops
             % Show images
             boundaryIm = zeros(obj.imageSize);
             boundaryIm(:, :, 1) = 1;
-            polygonIm = repmat(obj.cls_unprocessed, obj.imageSize(1:2));
             
             obj.handleImage.CData = obj.image;
             obj.handleLabelMap.CData = labelMap;
-            obj.handlePolygon.CData = polygonIm;
             obj.handleBoundary.CData = boundaryIm;
             
             % Set undo data
@@ -391,136 +336,9 @@ classdef CocoStuffAnnotator < handle & dynamicprops
             obj.updateTitle();
         end
         
-        % Button callbacks
-        function buttonLabelHierarchyClick(obj)
-            if isempty(obj.figLabelHierarchy) || ~isvalid(obj.figLabelHierarchy)
-                % Open new figure
-                obj.figLabelHierarchy = figure('Name', 'Label hierarchy', ...
-                    'MenuBar', 'none',...
-                    'NumberTitle', 'off');
-            else
-                % Make figure active again
-                figure(obj.figLabelHierarchy);
-            end
-            
-            % Get label hierarchy
-            [nodes, cats, heights] = CocoStuffClasses.getClassHierarchyStuff();
-            
-            % Plot label hierarchy
-            obj.plotTree(nodes, cats, heights, 1);
-            obj.plotTree(nodes, cats, heights, 2);
-            
-            % Set figure size
-            pos = get(obj.figLabelHierarchy, 'Position');
-            newPos = pos;
-            newPos(3) = 1000;
-            newPos(4) = 800;
-            set(obj.figLabelHierarchy, 'Position', newPos);
-        end
-        
+        % Button callbacks        
         function buttonPickLabelClick(obj)
             obj.drawMode = 'pickLabel';
-        end
-        
-        function plotTree(obj, nodes, cats, heights, isIndoors) % isIndoors: indoors = 1, outdoors = 2
-            % Get only relevant nodes and cats
-            sel = false(size(nodes));
-            if isIndoors == 1
-                sel(2) = true;
-            else
-                sel(3) = true;
-            end
-            while true
-                oldSel = sel;
-                sel = sel | ismember(nodes, find(sel));
-                if isequal(sel, oldSel)
-                    break;
-                end
-            end
-            nodes = nodes(sel);
-            cats = cats(sel);
-            heights = heights(sel);
-            
-            % Remap nodes in 0:x range
-            map = false(max(nodes), 1);
-            map(unique(nodes)) = true;
-            map = cumsum(map)-1;
-            nodes = map(nodes);
-            
-            % Plot them
-            curAx = axes('Parent', obj.figLabelHierarchy, 'Units', 'Norm');
-            axis(curAx, 'off');
-            treeplot(nodes');
-            if isIndoors == 1
-                set(curAx, 'Position', [0, 0, 0.5, 1]);
-            else
-                set(curAx, 'Position', [0.5, 0, 0.5, 1]);
-            end
-            [xs, ys] = treelayout(nodes);
-            
-            % Set appearance settings and show labels
-            isLeaf = ys == min(ys);
-            textInner = text(xs(~isLeaf) + 0.01, ys(~isLeaf) - 0.025, cats(~isLeaf), 'VerticalAlignment', 'Bottom', 'HorizontalAlignment', 'right');
-            textLeaf  = text(xs( isLeaf) - 0.01, ys( isLeaf) - 0.02,  cats( isLeaf), 'VerticalAlignment', 'Bottom', 'HorizontalAlignment', 'left');
-            set(curAx, 'XTick', [], 'YTick', [], 'Units', 'Normalized');
-            curAx.XLabel.String = '';
-            
-            % Rotate view
-            camroll(90);
-            
-            % Store only selectable/leaf nodes
-            selectable = heights == 3;
-            cats = cats(selectable);
-            ys = ys(selectable);
-            xs = xs(selectable);
-            
-            if isIndoors == 1
-                % Save to object
-                obj.categoriesLabelHierarchyIn = cats;
-                obj.ysLabelHierarchyIn = ys;
-                obj.xsLabelHierarchyIn = xs;
-                
-                % Register callbacks
-                set(curAx, 'ButtonDownFcn', @(handle, event) pickLabelInClick(obj, handle, event));
-                set(textInner, 'ButtonDownFcn', @(handle, event) pickLabelInClick(obj, handle, event));
-                set(textLeaf, 'ButtonDownFcn', @(handle, event) pickLabelInClick(obj, handle, event));
-            else
-                % Save to object
-                obj.categoriesLabelHierarchyOut = cats;
-                obj.ysLabelHierarchyOut = ys;
-                obj.xsLabelHierarchyOut = xs;
-                
-                % Register callbacks
-                set(curAx, 'ButtonDownFcn', @(handle, event) pickLabelOutClick(obj, handle, event));
-                set(textInner, 'ButtonDownFcn', @(handle, event) pickLabelOutClick(obj, handle, event));
-                set(textLeaf, 'ButtonDownFcn', @(handle, event) pickLabelOutClick(obj, handle, event));
-            end
-        end
-        
-        function pickLabelInClick(obj, ~, event)
-            % Find closest label indoors
-            pos = [event.IntersectionPoint(2), event.IntersectionPoint(1)];
-            labelIdx = obj.findClosestLabelInTree(pos, obj.ysLabelHierarchyIn, obj.xsLabelHierarchyIn, obj.categoriesLabelHierarchyIn); %#ok<PROPLC>
-            
-            % Set globally
-            obj.setLabelIdx(labelIdx); %#ok<PROPLC>
-        end
-        
-        function pickLabelOutClick(obj, ~, event)
-            % Find closest label outdoors
-            pos = [event.IntersectionPoint(2), event.IntersectionPoint(1)];
-            labelIdx = obj.findClosestLabelInTree(pos, obj.ysLabelHierarchyOut, obj.xsLabelHierarchyOut, obj.categoriesLabelHierarchyOut); %#ok<PROPLC>
-            
-            % Set globally
-            obj.setLabelIdx(labelIdx); %#ok<PROPLC>
-        end
-        
-        function[labelIdx] = findClosestLabelInTree(obj, pos, ys, xs, cats)
-            dists = sqrt((ys - pos(1)) .^ 2 + (xs - pos(2)) .^ 2);
-            [~, minDistInd] = min(dists);
-            
-            labelName = cats(minDistInd);
-            labelIdx = find(strcmp(obj.labelNames, labelName));
         end
         
         function buttonSuperpixelDrawClick(obj)
@@ -787,101 +605,13 @@ classdef CocoStuffAnnotator < handle & dynamicprops
                 if strcmp(obj.drawMode, 'pickLabel')
                     labelIdx = obj.handleLabelMap.CData(pos(1), pos(2)); %#ok<PROPLC>
                     
-                    if labelIdx ~= 1 %#ok<PROPLC>
-                        % Correct from read-only things to unlabeled
-                        if labelIdx == obj.cls_things %#ok<PROPLC>
-                            labelIdx = obj.cls_unlabeled; %#ok<PROPLC>
-                        end
-                        
+                    if labelIdx ~= 1 %#ok<PROPLC>                        
                         % Update labelIdx globally
                         obj.setLabelIdx(labelIdx); %#ok<PROPLC>
                     end
                     
                     % Set to drawing mode
                     obj.drawMode = obj.drawModeDefault;
-                elseif strcmp(obj.drawMode, 'polygonDraw')
-                    if obj.drawStatus == 2
-                        % Undo last click
-                        
-                        % Abort if not enough points
-                        if size(obj.curPolygon, 1) <= 1
-                            if size(obj.curPolygon, 1) == 1
-                                obj.curPolygon = obj.curPolygon(1:end-1, :);
-                            end
-                            obj.handlePolygon.CData(:) = obj.cls_unprocessed;
-                            obj.updateAlphaData();
-                            return;
-                        end
-                        
-                        % Remove last point
-                        obj.curPolygon = obj.curPolygon(1:end-1, :);
-                        
-                        % Check that there was a last click
-                        if size(obj.curPolygon, 1) < 1
-                            return;
-                        end
-                        
-                        % Reset polygon layer
-                        obj.handlePolygon.CData(:) = obj.cls_unprocessed;
-                        
-                        % Update existing polygon preview
-                        if size(obj.curPolygon, 1) >= 3
-                            mask = poly2mask(obj.curPolygon(:, 2), obj.curPolygon(:, 1), obj.imageSize(1), obj.imageSize(2));
-                            [ys, xs] = find(mask);
-                            inds = sub2ind(obj.imageSize(1:2), ys, xs);
-                            obj.handlePolygon.CData(inds) = labelIdx; %#ok<PROPLC>
-                        end
-                        
-                        obj.updateAlphaData();
-                        
-                    elseif obj.drawStatus == 3
-                        % Close polygon
-                        % (if we are close to the start or pressed right
-                        % click)
-                        
-                        % Only close it if we have at least 3 points
-                        if size(obj.curPolygon, 1) < 3
-                            return;
-                        end
-                        
-                        % Reset polygon layer
-                        obj.handlePolygon.CData(:) = obj.cls_unprocessed;
-                        
-                        % Get pixels inside polygon
-                        mask = poly2mask(obj.curPolygon(:, 2), obj.curPolygon(:, 1), obj.imageSize(1), obj.imageSize(2));
-                        [ys, xs] = find(mask);
-                        inds = sub2ind(obj.imageSize(1:2), ys, xs);
-                        
-                        % Reset polygon
-                        obj.curPolygon = [];
-                        
-                        % Reset polygon layer
-                        obj.handlePolygon.CData(:) = obj.cls_unprocessed;
-                        
-                        % Set update flag
-                        updatedPixels = true;
-                    else
-                        % Add new point
-                        obj.curPolygon = [obj.curPolygon; pos]; % each row: y, x
-                        
-                        % Reset polygon layer
-                        obj.handlePolygon.CData(:) = obj.cls_unprocessed;
-                        
-                        % Update existing polygon preview
-                        if size(obj.curPolygon, 1) >= 3
-                            mask = poly2mask(obj.curPolygon(:, 2), obj.curPolygon(:, 1), obj.imageSize(1), obj.imageSize(2));
-                            [ys, xs] = find(mask);
-                            inds = sub2ind(obj.imageSize(1:2), ys, xs);
-                            obj.handlePolygon.CData(inds) = labelIdx; %#ok<PROPLC>
-                        end
-                        
-%                         % Draw new polygon marker
-%                         markerSize = 3;
-%                         regionMapInds = obj.circleInds(pos, markerSize, obj.imageSize);
-%                         obj.handlePolygon.CData(regionMapInds) = labelIdx; %#ok<PROPLC>
-                        
-                        obj.updateAlphaData();
-                    end
                 else
                     % (Super-)pixel based drawing
                     
@@ -910,9 +640,9 @@ classdef CocoStuffAnnotator < handle & dynamicprops
                 
                 if updatedPixels
                     % Update pixels and save previous state
-                    indsIsOverwrite = (labelIdx == obj.cls_unprocessed | obj.drawOverwrite ...
-                        | obj.handleLabelMap.CData(inds) == obj.cls_unprocessed) ...
-                        & obj.handleLabelMap.CData(inds) ~= obj.cls_things; %#ok<PROPLC>
+                    indsIsOverwrite = labelIdx == obj.cls_unprocessed ...
+                        | obj.drawOverwrite ...
+                        | obj.handleLabelMap.CData(inds) == obj.cls_unprocessed; %#ok<PROPLC>
                     inds = inds(indsIsOverwrite);
                     obj.labelMapUndo = obj.handleLabelMap.CData;
                     obj.handleLabelMap.CData(inds) = labelIdx; %#ok<PROPLC>
@@ -965,7 +695,6 @@ classdef CocoStuffAnnotator < handle & dynamicprops
         function updateAlphaData(obj)
             set(obj.handleLabelMap, 'AlphaData', obj.labelMapTransparency * double(obj.handleLabelMap.CData ~= obj.cls_unprocessed));
             set(obj.handleBoundary, 'AlphaData', obj.boundaryTransparency * obj.regionBoundaries);
-            set(obj.handlePolygon,  'AlphaData', obj.labelMapTransparency * double(obj.handlePolygon.CData ~= obj.cls_unprocessed));
         end
         
         function figMouseMove(obj, ~, ~)
@@ -997,12 +726,36 @@ classdef CocoStuffAnnotator < handle & dynamicprops
             if strcmp(event.EventName, 'KeyPress')
                 if isempty(event.Character)
                     % Do nothing
-                elseif strcmp(event.Character, 'q')
-                    % Button label hierarchy
-                    obj.buttonLabelHierarchyClick();
                 elseif strcmp(event.Character, '1')
                     % Unlabeled class
-                    obj.setLabelIdx(obj.cls_unlabeled);
+                    obj.setLabelIdx(find(strcmp(obj.labelNames, '1'))); %#ok<FNDSB>
+                elseif strcmp(event.Character, '2')
+                    % Unlabeled class
+                    obj.setLabelIdx(find(strcmp(obj.labelNames, '2'))); %#ok<FNDSB>
+                elseif strcmp(event.Character, '3')
+                    % Unlabeled class
+                    obj.setLabelIdx(find(strcmp(obj.labelNames, '3'))); %#ok<FNDSB>
+                elseif strcmp(event.Character, '4')
+                    % Unlabeled class
+                    obj.setLabelIdx(find(strcmp(obj.labelNames, '4'))); %#ok<FNDSB>
+                elseif strcmp(event.Character, '5')
+                    % Unlabeled class
+                    obj.setLabelIdx(find(strcmp(obj.labelNames, '5'))); %#ok<FNDSB>
+                elseif strcmp(event.Character, '6')
+                    % Unlabeled class
+                    obj.setLabelIdx(find(strcmp(obj.labelNames, '6'))); %#ok<FNDSB>
+                elseif strcmp(event.Character, '7')
+                    % Unlabeled class
+                    obj.setLabelIdx(find(strcmp(obj.labelNames, '7'))); %#ok<FNDSB>
+                elseif strcmp(event.Character, '8')
+                    % Unlabeled class
+                    obj.setLabelIdx(find(strcmp(obj.labelNames, '8'))); %#ok<FNDSB>
+                elseif strcmp(event.Character, '9')
+                    % Unlabeled class
+                    obj.setLabelIdx(find(strcmp(obj.labelNames, '9'))); %#ok<FNDSB>
+                elseif strcmp(event.Character, '0')
+                    % Unlabeled class
+                    obj.setLabelIdx(find(strcmp(obj.labelNames, '10'))); %#ok<FNDSB>
                 elseif strcmp(event.Character, '+')
                     obj.ui.popupPointSize.Value = min(obj.ui.popupPointSize.Value + 1, numel(obj.ui.popupPointSize.String));
                     obj.drawSize = str2double(obj.ui.popupPointSize.String{obj.ui.popupPointSize.Value});
@@ -1030,12 +783,6 @@ classdef CocoStuffAnnotator < handle & dynamicprops
         
         %If someone closes the figure than everything will be deleted !
         function onclose(obj, src, event) %#ok<INUSD>
-            
-            % Close other windows
-            if ishandle(obj.figLabelHierarchy)
-                close(obj.figLabelHierarchy);
-            end
-            
             delete(src)
             delete(obj)
         end
